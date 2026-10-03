@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google Health Local Sync</title>
+<style>
+  body { font: 16px/1.6 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         max-width: 42rem; margin: 4rem auto; padding: 0 1.25rem; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  .sub { color: #666; margin-top: 0; }
+  code { background: #f2f2f2; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
+  a { color: #0b5fff; }
+  hr { border: 0; border-top: 1px solid #e5e5e5; margin: 2.5rem 0 1rem; }
+  footer { color: #666; font-size: .9rem; }
+</style>
+</head>
+<body>
+  <h1>Google Health Local Sync</h1>
+  <p class="sub">A personal-use tool for keeping your own health data on your own disk.</p>
+
+  <p>
+    This is a single-user tool. It reads your Google Health (Fitbit) data through
+    the Google Health API and stores it in a local SQLite database on your own
+    machine. It is not a service, there is no sign-up, and nothing is collected
+    from anyone.
+  </p>
+
+  <ul>
+    <li><strong>What it does:</strong> calls the Google Health API as you, for your account only.</li>
+    <li><strong>Where the data goes:</strong> a SQLite file on your own disk. Nothing is uploaded or shared.</li>
+    <li><strong>Who can use it:</strong> the owner of the Google Cloud project it runs under, and no one else.
+        The OAuth client is unverified and Google caps it at 100 users; exactly one account is authorised.</li>
+  </ul>
+
+  <p>
+    Source and documentation:
+    <a href="https://github.com/cflux/google-health-local-sync">github.com/cflux/google-health-local-sync</a>
+  </p>
+
+  <hr>
+  <footer>
+    <a href="privacy.html">Privacy policy</a>
+  </footer>
+</body>
+</html>
