@@ -2,10 +2,95 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 DEFAULT_DATA_DIR = Path.home() / ".hermes" / "google_health"
+
+# Timezone used to turn a DAILY record's civil date into an instant. A civil date
+# is local by definition, so the machine's local zone is the honest choice -- and
+# raw_json keeps the date itself, so nothing is lost if this ever changes.
+CIVIL_TZ = "America/Los_Angeles"
+
+
+def _find_mapping_with(node: Any, key: str, depth: int = 0) -> dict[str, Any]:
+    """Return the first mapping in the document that carries <key> as a string.
+
+    WHY THIS SEARCHES INSTEAD OF INDEXING
+    -------------------------------------
+    The original code guessed the payload key by transforming the data_type:
+
+        payload = data_point.get(data_type.replace("-", "_")) or data_point.get(data_type)
+
+    Google's payload keys are camelCase -- the key for 'active-energy-burned' is
+    'activeEnergyBurned', never 'active_energy_burned'. So for every multi-word
+    data_type the lookup missed, payload became {}, and start_time, end_time and
+    update_time were written as NULL. The row landed; the dates did not; nothing
+    raised. 44,316 of 49,504 rows were undated because of it, and a date-filtered
+    query returned a tenth of the store while looking perfectly healthy.
+
+    A third naming guess would fail the same way the first two did, so this walks
+    the document. It returns the containing MAPPING rather than the bare value on
+    purpose: pulling endTime from the whole document would find a sleep STAGE's
+    endTime out of `stages` instead of the session's own.
+    """
+    if depth > 6:
+        return {}
+    if isinstance(node, dict):
+        if isinstance(node.get(key), str):
+            return node
+        for child_key, child in node.items():
+            if child_key == "dataSource":
+                continue
+            found = _find_mapping_with(child, key, depth + 1)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for child in node:
+            found = _find_mapping_with(child, key, depth + 1)
+            if found:
+                return found
+    return {}
+
+
+def _civil_day_start(node: Any, depth: int = 0) -> str | None:
+    """The UTC instant of local midnight for a DAILY record's civil date.
+
+    Daily rollups carry `date: {year, month, day}` and no interval at all -- they
+    describe a calendar day, not a moment. 18,877 rows in the local store are of
+    this kind (mostly Apple Health imports: platform HEALTH_KIT, no Fitbit
+    interval), so the interval search cannot reach them no matter how it is
+    written. Without this they stay invisible to every date query forever.
+
+    Local midnight is the only honest instant to give such a row. It makes day
+    filters work uniformly, and raw_json still holds the exact civil date -- so
+    nothing is lost, and a consumer that needs day-granularity can read it there.
+    """
+    if depth > 6:
+        return None
+    if isinstance(node, dict):
+        d = node.get("date")
+        if isinstance(d, dict) and {"year", "month", "day"} <= set(d):
+            try:
+                local = datetime(int(d["year"]), int(d["month"]), int(d["day"]),
+                                 tzinfo=ZoneInfo(CIVIL_TZ))
+            except (ValueError, TypeError):
+                return None
+            return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for child_key, child in node.items():
+            if child_key == "dataSource":
+                continue
+            got = _civil_day_start(child, depth + 1)
+            if got:
+                return got
+    elif isinstance(node, list):
+        for child in node:
+            got = _civil_day_start(child, depth + 1)
+            if got:
+                return got
+    return None
 
 
 class GoogleHealthStore:
@@ -57,11 +142,21 @@ class GoogleHealthStore:
         self.init_db()
         record_id = data_point.get("name") or json.dumps(data_point, sort_keys=True)
         data_source = data_point.get("dataSource") or {}
-        payload = data_point.get(data_type.replace("-", "_")) or data_point.get(data_type) or {}
-        interval = payload.get("interval") or {}
-        start = interval.get("startTime") or payload.get("startTime")
-        end = interval.get("endTime") or payload.get("endTime") or payload.get("sessionEndTime")
-        update_time = payload.get("updateTime") or data_point.get("updateTime")
+        # Was a guessed payload key -- see _find_mapping_with. It missed for every
+        # multi-word data_type, so start/end/update were written as NULL for 90% of
+        # the store without raising anything. The walk () gives the mapping
+        # that actually holds the times, and takes endTime from THAT mapping so a
+        # sleep stage's endTime cannot be mistaken for the session's.
+        interval = _find_mapping_with(data_point, "startTime")
+        start = interval.get("startTime")
+        end = interval.get("endTime") or interval.get("sessionEndTime")
+        update_time = interval.get("updateTime")
+        if not update_time:
+            update_time = _find_mapping_with(data_point, "updateTime").get("updateTime")
+        if not start:
+            # No interval anywhere means a DAILY record, which is dated by its
+            # civil date rather than by a moment.
+            start = _civil_day_start(data_point)
         raw_json = json.dumps(data_point, ensure_ascii=False, sort_keys=True)
         with sqlite3.connect(self.db_path) as con:
             cur = con.execute(
