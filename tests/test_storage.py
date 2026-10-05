@@ -74,6 +74,45 @@ def test_distinct_intervals_are_never_collapsed(tmp_path):
     assert len(store.list_datapoints("time-in-heart-rate-zone")) == 3
 
 
+def test_daily_rollups_for_different_days_both_survive(tmp_path):
+    """The supersede is keyed on the civil day, not on the type. Two days of the
+    same one-per-day rollup are two facts, and the gate must not eat one. Payload
+    shape copied from the live store."""
+    store = GoogleHealthStore(tmp_path)
+    store.init_db()
+
+    for day, bpm in ((3, "57"), (4, "56")):
+        store.upsert_datapoint(
+            data_type="daily-resting-heart-rate",
+            data_point={"dailyRestingHeartRate": {
+                "beatsPerMinute": bpm,
+                "dailyRestingHeartRateMetadata": {"calculationMethod": "WITH_SLEEP"},
+                "date": {"day": day, "month": 10, "year": 2026}}},
+        )
+
+    assert len(store.list_datapoints("daily-resting-heart-rate")) == 2
+
+
+def test_civil_day_prefers_the_start_over_the_end(tmp_path):
+    """A rollup carries civilStartTime AND civilEndTime. Payloads are stored with
+    sort_keys=True, so 'civilEndTime' sorts first and a naive first-match walk takes
+    the END date, putting the record a day late. Shape copied from the live store.
+    """
+    store = GoogleHealthStore(tmp_path)
+    store.init_db()
+    store.upsert_datapoint(
+        data_type="calories-in-heart-rate-zone:daily-rollup",
+        data_point={"calories-in-heart-rate-zone:daily-rollup": {
+            "caloriesInHeartRateZone": {"caloriesInHeartRateZones": []},
+            "civilEndTime": {"date": {"day": 26, "month": 9, "year": 2026}, "time": {}},
+            "civilStartTime": {"date": {"day": 25, "month": 9, "year": 2026}, "time": {}},
+        }},
+    )
+    row = store.list_datapoints("calories-in-heart-rate-zone:daily-rollup")[0]
+    assert row["start_time"].startswith("2026-09-25"), (
+        f"expected the civil START day, got {row['start_time']}")
+
+
 def test_nameless_rows_without_an_interval_are_not_collapsed(tmp_path):
     """No name and no interval means no stable identity AND no observed span, so
     there is nothing to supersede on. These must keep accumulating rather than

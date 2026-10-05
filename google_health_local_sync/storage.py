@@ -79,10 +79,18 @@ def _civil_day_start(node: Any, depth: int = 0) -> str | None:
             except (ValueError, TypeError):
                 return None
             return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        for child_key, child in node.items():
-            if child_key == "dataSource":
-                continue
-            got = _civil_day_start(child, depth + 1)
+        # A payload can carry BOTH civilStartTime and civilEndTime for one record.
+        # Walking in document order and taking the first `date` picks the END date
+        # whenever the serialisation sorts it first -- and sort_keys=True does
+        # ('civilEndTime' < 'civilStartTime'), so the whole record lands a day late.
+        # Found by a dry run that wanted to shift 60 rollup rows forward a day while
+        # the stored values were right. Start-side keys win; end-side keys are skipped.
+        keys = [k for k in node if k != "dataSource"]
+        ordered = ([k for k in keys if "start" in k.lower()]
+                   + [k for k in keys if "start" not in k.lower()
+                                         and "end" not in k.lower()])
+        for child_key in ordered:
+            got = _civil_day_start(node[child_key], depth + 1)
             if got:
                 return got
     elif isinstance(node, list):
@@ -166,8 +174,30 @@ class GoogleHealthStore:
             # No interval anywhere means a DAILY record, which is dated by its
             # civil date rather than by a moment.
             start = _civil_day_start(data_point)
+        # A one-per-day rollup: a `daily-*` record with no sampleTime, i.e. one value
+        # for one civil day. A second row for the same day is a CORRECTION, not an
+        # observation -- Fitbit finalises these after the first fetch, the value moves,
+        # and the payload hash acting as record_id moves with it, so INSERT OR IGNORE
+        # kept both with nothing marking which was current.
+        #
+        # NOT keyed on (start_time, end_time): every sample in a civil-date-dated day
+        # shares that span, because the fallback above writes local midnight and
+        # leaves end_time NULL. Keying on it collapses 331 distinct oxygen-saturation
+        # samples into one. The prefix plus the absence of sampleTime is the
+        # discriminator, and it is checked against a real payload in the tests.
+        one_per_day = data_type.startswith("daily-") and "sampleTime" not in data_point
         raw_json = json.dumps(data_point, ensure_ascii=False, sort_keys=True)
         with sqlite3.connect(self.db_path) as con:
+            # Supersede only for a one-per-day rollup (see one_per_day above). Keyed
+            # on start_time, which for such a record IS its civil day, so the newest
+            # fetch wins and the superseded version is removed rather than left to
+            # compete with it.
+            if one_per_day and start is not None:
+                con.execute(
+                    "DELETE FROM data_points "
+                    "WHERE data_type = ? AND record_id <> ? AND start_time = ?",
+                    (data_type, record_id, start),
+                )
             cur = con.execute(
                 """
                 INSERT OR IGNORE INTO data_points
