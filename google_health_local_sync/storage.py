@@ -148,7 +148,16 @@ class GoogleHealthStore:
         # that actually holds the times, and takes endTime from THAT mapping so a
         # sleep stage's endTime cannot be mistaken for the session's.
         interval = _find_mapping_with(data_point, "startTime")
-        start = interval.get("startTime")
+        if not interval:
+            # A POINT sample has no interval -- it has an instant, and Google calls
+            # it sampleTime.physicalTime. Six data types store it that way
+            # (oxygen-saturation, heart-rate-variability, weight, height, vo2-max,
+            # respiratory-rate-sleep-summary), and searching only for startTime
+            # missed all of them, fell through to the civil-day fallback below, and
+            # stamped local midnight on 3,046 rows whose real times -- down to the
+            # second -- were in the payload the whole time. See _civil_day_start.
+            interval = _find_mapping_with(data_point, "physicalTime")
+        start = interval.get("startTime") or interval.get("physicalTime")
         end = interval.get("endTime") or interval.get("sessionEndTime")
         update_time = interval.get("updateTime")
         if not update_time:
